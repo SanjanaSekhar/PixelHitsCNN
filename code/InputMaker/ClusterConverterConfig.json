@@ -1,0 +1,73 @@
+{
+"common":{
+    "double_frac" : 0.3,
+    "fe_type" : 1,
+    "simulate_double" : "true",
+    "lines_per_cluster" : 14
+},
+"layer_settings":{
+    "default":{
+        "threshold" : 1800.0,
+        "threshold_noise_frac" : 0.073,
+        "common_noise_frac" : 0.080,
+        "gain_frac" : 0.12,
+        "readout_noise" : 350.0,
+        "noise" : 250.0,
+        "vcal" : 47.0,
+        "vcaloffst" : 60.0,
+        "qperToT" : 1500,
+        "nbitsTOT" : 4,
+        "dualslope" : 4,
+        "gain" : 3.19,
+        "ped" : 16.46,
+        "p0" : 0.01218,
+        "p1" : 0.711,
+        "p2" : 203.0,
+        "p3" : 148.0
+        },
+    "L1":{
+        "threshold" : 2600.0,
+        "common_noise_frac" : 0.060,
+        "gain_frac" : 0.25,
+        "vcal" : 50.0,
+        "vcaloffst" : 670.0
+        },
+    "L2":{
+        "threshold" : 2900.0,
+        "gain_frac" : 0.08
+        },
+    "L2new":{
+        "threshold" : 2100.0,
+        "gain_frac" : 0.08
+        },
+    "L3":{
+        },
+    "L4m":{
+        "threshold" : 1700.0
+        },
+    "L4p":{
+        }       
+},
+
+"L1U":{
+    "layer_settings_overwrite":"L1"
+},
+"L1F":{
+    "layer_settings_overwrite":"L1"
+},
+"L2new":{
+    "layer_settings_overwrite":"L2new"
+},
+"L3m":{
+    "layer_settings_overwrite":"L3"
+},
+"L3p":{
+    "layer_settings_overwrite":"L3"
+},
+"L4m":{
+    "layer_settings_overwrite":"L4m"
+},
+"L4p":{
+    "layer_settings_overwrite":"L4p"
+}
+}
