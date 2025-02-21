@@ -7,13 +7,15 @@ import shutil
 
 class InputMaker:
 
-    def __init__(self,input_folder,output_folder,dataset):
+    def __init__(self,input_folder,output_folder,dataset,template_id):
         #Dataset should be one of the layer keys in ClusterConverterConfig.json file
         self.input_folder = input_folder
         self.output_folder = output_folder
-        self.train_file = f"{dataset}_training.out"
-        self.test_file = f"{dataset}_testing.out"
+        self.train_file =  join(self.input_folder, f"{dataset}_training.out")
+        self.test_file = join(self.input_folder, f"{dataset}_testing.out")
         self.dataset = dataset
+        self.template_id = template_id
+
 
     def unzip_dir(self):
         '''
@@ -77,11 +79,23 @@ class InputMaker:
             subprocess.call(f"rm {file_name}",shell=True)
 
     def convert_txt_files(self):
-        clu_converter = ClusterConverter("ClusterConverterConfig.json",self.dataset)
-        self.output_train = f"{self.dataset}_train.hdf5"
-        self.output_test = f"{self.dataset}_test.hdf5"
-        clu_converter.text_to_hdf5(self.train_file,self.output_train)
-        clu_converter.text_to_hdf5(self.test_file,self.output_test)
+        clu_converter = ClusterConverter("ClusterConverterConfig.json", self.dataset,self.template_id)
+        self.output_train = join(self.output_folder, f"{self.dataset}_train.hdf5")
+        self.output_test = join(self.output_folder, f"{self.dataset}_test.hdf5")
+
+        if exists(self.train_file):
+            clu_converter.text_to_hdf5(self.train_file, self.output_train)
+            print(f"Converted {self.train_file} to {self.output_train}")
+        else:
+            print(f"Warning: Train file not found: {self.train_file}")
+
+        if exists(self.test_file):
+            clu_converter.text_to_hdf5(self.test_file, self.output_test)
+            print(f"Converted {self.test_file} to {self.output_test}")
+        else:
+            print(f"Warning: Test file not found: {self.test_file}")
+
+        print("Conversion process completed.")
     
     def clear(self):
         subprocess.call(f"rm {self.train_file} {self.test_file}",shell=True)

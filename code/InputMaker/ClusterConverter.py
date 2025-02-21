@@ -9,11 +9,13 @@ from scipy.ndimage.measurements import label
 import json
 from itertools import islice
 import os 
+import ThresholdManager
+import time
 
 class ClusterConverter:
     #Class to load .json file and convert .txt cluster files into "realistic" clusters and store them in hdf5 format
 
-    def __init__(self,json_file,dataset):
+    def __init__(self,json_file,dataset,template_id):
         
         with open(json_file) as f:
             json_file = json.load(f)
@@ -34,6 +36,9 @@ class ClusterConverter:
             for key, value in layer_settings[layer_overwrite].items():
                 setattr(self, key, value)    
 
+            self.threshold_manager = ThresholdManager.ThresholdManager(template_id)
+            self.CHARGE_UNIT = 25000
+
             self.print_attributes()        
 
     def print_attributes(self):
@@ -42,6 +47,26 @@ class ClusterConverter:
         for attribute, value in vars(self).items():
             print(f"{attribute}: {value}")
         print("--------------------")
+
+
+    def decapitate_clusters(self):
+        #Limit charge in cluster and return original total cluster charge
+        #print("Decapitating pixels")
+        #start_time = time.time() 
+        self.threshold_manager.get_pixmax(0., 0.)#Dummy calls to get rid of first few inputs that result in template details
+        self.threshold_manager.get_pixmax(0., 0.)
+        for i, cluster in enumerate(self.cluster_matrices):
+            # if(i%10000==0):
+            #     print(f"{i}/{len(self.cluster_matrices)}")
+            pixmax = float(self.threshold_manager.get_pixmax(self.cota[i][0], self.cotb[i][0]))
+            pixmax = pixmax/self.CHARGE_UNIT #At this point, clusters are already divided by unit charge
+            orig_clu_charge = np.sum(cluster)
+            self.cluster_matrices[i, :, :, 0] = np.minimum(self.cluster_matrices[i, :, :, 0], pixmax)
+            self.cluster_charge[i][0] = orig_clu_charge
+        #self.threshold_manager.terminate_process()
+        #end_time = time.time()
+        #elapsed_time = end_time - start_time
+        #print(f"Decapitation time: {elapsed_time:.1f} seconds")
     
     def text_to_hdf5(self,input_file,output_file):
         '''
@@ -50,17 +75,6 @@ class ClusterConverter:
         Processes pixelav clusters and converts them to realistic CMS clusters
         Saves them in train or test .hd5f file
         '''
-        self.total_x_position = None
-        self.total_y_position = None
-        self.total_cota_x = None
-        self.total_cotb_x = None
-        self.total_cota_y = None
-        self.total_cotb_y = None
-        self.total_clustersize_x = None
-        self.total_clustersize_y = None
-        self.total_x_flat = None
-        self.total_y_flat = None
-
         def count_lines(filename):
             with open(filename, 'r') as file:
                 line_count = sum(1 for line in file)
@@ -91,9 +105,11 @@ class ClusterConverter:
             self.pixelsize_z = np.zeros((n_train,1))
             self.clustersize_x = np.zeros((n_train,1))
             self.clustersize_y = np.zeros((n_train,1))
+            self.cluster_charge = np.zeros((n_train,1))
 
             self.extract_matrices(lines)
             self.convert_pav_to_cms()
+
             #n_elec were scaled down by 10 so multiply
             self.cluster_matrices *= 10
 
@@ -102,6 +118,8 @@ class ClusterConverter:
 
             self.center_clusters()
 
+            self.decapitate_clusters()
+
             self.x_flat = np.zeros((len(self.cluster_matrices),13))
             self.y_flat = np.zeros((len(self.cluster_matrices),21))
             self.project_matrices_xy()
@@ -109,17 +127,21 @@ class ClusterConverter:
 
             if self.simulate_double:
                 #Simulate_double creates new clusters in x and y so the cota/b can diverge between x and y
-                cota_x,cotb_x,cota_y,cotb_y = self.simulate_double_width_1d(self.cota,self.cotb,n_double)
+                cota_x,cotb_x,cota_y,cotb_y,cluster_charge_x,cluster_charge_y = self.simulate_double_width_1d(self.cota,self.cotb,self.cluster_charge,n_double)
                 self.cota_x = cota_x
                 self.cota_y = cota_y
                 self.cotb_x = cotb_x
                 self.cotb_y = cotb_y
+                self.cluster_charge_x = cluster_charge_x
+                self.cluster_charge_y = cluster_charge_y
             else:
                 self.cota_x = self.cota
                 self.cota_y = self.cota
                 self.cotb_x = self.cotb
                 self.cotb_y = self.cotb
-    
+                self.cluster_charge_x = self.cluster_charge
+                self.cluster_charge_y = self.cluster_charge
+        
         set_pixelsize(input_file)
         temp_file = open(input_file, "r")
         temp_file.close()
@@ -143,7 +165,7 @@ class ClusterConverter:
             next(file)
             next(file)
             '''
-            Cluster files can be absolute units, close to 10 GB
+            Cluster files can be absolute units, around 10 GB
             We risk running out of memory if we process all at once
             Processing is done in batches of $batch_size clusters
             '''
@@ -171,6 +193,7 @@ class ClusterConverter:
         print(f"Saved clusters to: {f_y_name}")
 
     def extract_matrices(self,lines):
+        print(f"No. of lines: {len(lines)}")
         n=0
         n_per_file = int(len(lines)/14)
         for j in range(0,n_per_file):
@@ -416,7 +439,7 @@ class ClusterConverter:
                     one_mat=np.roll(one_mat,-shift,axis=1)
                     self.y_position[j]-=self.pixelsize_y[index]*shift
 
-            one_mat = one_mat/25000.
+            one_mat = one_mat/self.CHARGE_UNIT
             self.cluster_matrices[j]=one_mat[:,:,np.newaxis]
             j+=1
 
@@ -448,13 +471,15 @@ class ClusterConverter:
                 f_x.create_dataset("x", np.shape(self.x_position), data=self.x_position,maxshape=(None,)+self.x_position.shape[1:], chunks=True)
                 f_x.create_dataset("cota", np.shape(self.cota_x), data=self.cota_x,maxshape=(None,)+self.cota_x.shape[1:], chunks=True)
                 f_x.create_dataset("cotb", np.shape(self.cotb_x), data=self.cotb_x,maxshape=(None,)+self.cotb_x.shape[1:], chunks=True)
-                f_x.create_dataset("clustersize_x", np.shape(self.clustersize_x), data=self.clustersize_x,maxshape=(None,)+self.clustersize_x.shape[1:], chunks=True)
+                f_x.create_dataset("cluster_charge", np.shape(self.cluster_charge_x), data=self.cluster_charge_x,maxshape=(None,)+self.cluster_charge_x.shape[1:], chunks=True)
+                f_x.create_dataset("clustersize", np.shape(self.clustersize_x), data=self.clustersize_x,maxshape=(None,)+self.clustersize_x.shape[1:], chunks=True)
                 f_x.create_dataset("x_flat", np.shape(self.x_flat), data=self.x_flat,maxshape=(None,)+self.x_flat.shape[1:], chunks=True)
 
                 f_y.create_dataset("y", np.shape(self.y_position), data=self.y_position,maxshape=(None,)+self.y_position.shape[1:], chunks=True)
                 f_y.create_dataset("cota", np.shape(self.cota_y), data=self.cota_y,maxshape=(None,)+self.cota_y.shape[1:], chunks=True)
                 f_y.create_dataset("cotb", np.shape(self.cotb_y), data=self.cotb_y,maxshape=(None,)+self.cotb_y.shape[1:], chunks=True)
-                f_y.create_dataset("clustersize_y", np.shape(self.clustersize_y), data=self.clustersize_y,maxshape=(None,)+self.clustersize_y.shape[1:], chunks=True)
+                f_y.create_dataset("cluster_charge", np.shape(self.cluster_charge_y), data=self.cluster_charge_y,maxshape=(None,)+self.cluster_charge_y.shape[1:], chunks=True)
+                f_y.create_dataset("clustersize", np.shape(self.clustersize_y), data=self.clustersize_y,maxshape=(None,)+self.clustersize_y.shape[1:], chunks=True)
                 f_y.create_dataset("y_flat", np.shape(self.y_flat), data=self.y_flat,maxshape=(None,)+self.y_flat.shape[1:], chunks=True)
             else:
                 # Append datasets
@@ -467,8 +492,11 @@ class ClusterConverter:
                 f_x["cotb"].resize((f_x["cotb"].shape[0] + np.shape(self.cotb_x)[0]), axis = 0)
                 f_x["cotb"][-np.shape(self.cotb_x)[0]:] = self.cotb_x
 
-                f_x["clustersize_x"].resize((f_x["clustersize_x"].shape[0] + np.shape(self.clustersize_x)[0]), axis = 0)
-                f_x["clustersize_x"][-np.shape(self.clustersize_x)[0]:] = self.clustersize_x
+                f_x["cluster_charge"].resize((f_x["cluster_charge"].shape[0] + np.shape(self.cluster_charge_x)[0]), axis = 0)
+                f_x["cluster_charge"][-np.shape(self.cluster_charge_x)[0]:] = self.cluster_charge_x
+
+                f_x["clustersize"].resize((f_x["clustersize"].shape[0] + np.shape(self.clustersize_x)[0]), axis = 0)
+                f_x["clustersize"][-np.shape(self.clustersize_x)[0]:] = self.clustersize_x
 
                 f_x["x_flat"].resize((f_x["x_flat"].shape[0] + np.shape(self.x_flat)[0]), axis = 0)
                 f_x["x_flat"][-np.shape(self.x_flat)[0]:] = self.x_flat
@@ -482,26 +510,16 @@ class ClusterConverter:
                 f_y["cotb"].resize((f_y["cotb"].shape[0] + np.shape(self.cotb_y)[0]), axis = 0)
                 f_y["cotb"][-np.shape(self.cotb_y)[0]:] = self.cotb_y
 
-                f_y["clustersize_y"].resize((f_y["clustersize_y"].shape[0] + np.shape(self.clustersize_y)[0]), axis = 0)
-                f_y["clustersize_y"][-np.shape(self.clustersize_y)[0]:] = self.clustersize_y
+                f_y["cluster_charge"].resize((f_y["cluster_charge"].shape[0] + np.shape(self.cluster_charge_y)[0]), axis = 0)
+                f_y["cluster_charge"][-np.shape(self.cluster_charge_y)[0]:] = self.cluster_charge_y
+
+                f_y["clustersize"].resize((f_y["clustersize"].shape[0] + np.shape(self.clustersize_y)[0]), axis = 0)
+                f_y["clustersize"][-np.shape(self.clustersize_y)[0]:] = self.clustersize_y
 
                 f_y["y_flat"].resize((f_y["y_flat"].shape[0] + np.shape(self.y_flat)[0]), axis = 0)
                 f_y["y_flat"][-np.shape(self.y_flat)[0]:] = self.y_flat
 
-    def create_datasets_1d(self,f_x,f_y):
-
-        f_x.create_dataset("x", np.shape(self.total_x_position), data=self.total_x_position)
-        f_y.create_dataset("y", np.shape(self.total_y_position), data=self.total_y_position)
-        f_x.create_dataset("cota", np.shape(self.total_cota_x), data=self.total_cota_x)
-        f_x.create_dataset("cotb", np.shape(self.total_cotb_x), data=self.total_cotb_x)
-        f_y.create_dataset("cota", np.shape(self.total_cota_y), data=self.total_cota_y)
-        f_y.create_dataset("cotb", np.shape(self.total_cotb_y), data=self.total_cotb_y)
-        f_x.create_dataset("clustersize_x", np.shape(self.total_clustersize_x), data=self.total_clustersize_x)
-        f_y.create_dataset("clustersize_y", np.shape(self.total_clustersize_y), data=self.total_clustersize_y)
-        f_x.create_dataset("x_flat", np.shape(self.total_x_flat), data=self.total_x_flat)
-        f_y.create_dataset("y_flat", np.shape(self.total_y_flat), data=self.total_y_flat)
-
-    def simulate_double_width_1d(self,cota,cotb,n_double):
+    def simulate_double_width_1d(self,cota,cotb,cluster_charge,n_double):
 
         # only for 1d 
         # 3 cases: double in x, double in y, double in x and y
@@ -532,7 +550,7 @@ class ClusterConverter:
         #print("no of available choices: ",np.intersect1d(np.argwhere(self.clustersize_x!=1)[:,0],np.argwhere(self.clustersize_x!=2)[:,0]),np.intersect1d(np.argwhere(self.clustersize_y!=1)[:,0],np.argwhere(self.clustersize_y!=2)[:,0]))
         print("old x_flat shape = ",self.x_flat.shape,"old y_flat shape = ",self.y_flat.shape)
         
-        flat_list,clustersize_list,pos_list,cota_list,cotb_list = [],[],[],[],[]
+        flat_list,clustersize_list,pos_list,cota_list,cotb_list, charge_list = [],[],[],[],[],[]
         count=0
 
         for i in double_idx_x:
@@ -556,6 +574,7 @@ class ClusterConverter:
                 pos_list.append(self.x_position[i].tolist())
                 cota_list.append(cota[i].tolist())
                 cotb_list.append(cotb[i].tolist())
+                charge_list.append(cluster_charge[i].tolist())
                 count+=1
                 #if count < 30:
                 #   print("1 dpix cluster x")
@@ -569,6 +588,7 @@ class ClusterConverter:
                     pos_list.append(self.x_position[i].tolist())
                     cota_list.append(cota[i].tolist())
                     cotb_list.append(cotb[i].tolist())
+                    charge_list.append(cluster_charge[i].tolist())
                     count+=1
 
                 #   if count < 30:
@@ -580,8 +600,10 @@ class ClusterConverter:
         self.x_position = np.vstack((self.x_position,np.array(pos_list).reshape((count,1))))
         cota_x = np.vstack((cota,np.array(cota_list).reshape((count,1))))
         cotb_x = np.vstack((cotb,np.array(cotb_list).reshape((count,1))))
+        cluster_charge_x =  np.vstack((cluster_charge,np.array(charge_list).reshape((count,1))))
 
-        flat_list,clustersize_list,pos_list,cota_list,cotb_list = [],[],[],[],[]
+
+        flat_list,clustersize_list,pos_list,cota_list,cotb_list,charge_list = [],[],[],[],[],[]
         count=0
 
         for i in double_idx_y:
@@ -605,6 +627,7 @@ class ClusterConverter:
                 pos_list.append(self.y_position[i].tolist())
                 cota_list.append(cota[i].tolist())
                 cotb_list.append(cotb[i].tolist())
+                charge_list.append(cluster_charge[i].tolist())
                 count+=1
                 #if count < 30:
                 #   print("1 dpix cluster y")
@@ -617,6 +640,7 @@ class ClusterConverter:
                     pos_list.append(self.y_position[i].tolist())
                     cota_list.append(cota[i].tolist())
                     cotb_list.append(cotb[i].tolist())
+                    charge_list.append(cluster_charge[i].tolist())
                     count+=1
 
                 #   if count < 30:
@@ -628,11 +652,11 @@ class ClusterConverter:
         self.y_position = np.vstack((self.y_position,np.array(pos_list).reshape((count,1))))
         cota_y = np.vstack((cota,np.array(cota_list).reshape((count,1))))
         cotb_y = np.vstack((cotb,np.array(cotb_list).reshape((count,1))))
-
+        cluster_charge_y =  np.vstack((cluster_charge,np.array(charge_list).reshape((count,1))))
 
         print("new x_flat shape = ",self.x_flat.shape,"new y_flat shape = ",self.y_flat.shape)
         print("simulated 1 and 2 double width pix in x and y for 1D")
-        return cota_x,cotb_x,cota_y,cotb_y
+        return cota_x,cotb_x,cota_y,cotb_y,cluster_charge_x,cluster_charge_y
 
 if __name__ == "__main__":
     test_object = ClusterConverter("ClusterConverterConfig.json","L1U")

@@ -1,10 +1,11 @@
 from Trainer import Trainer
 
-for layer in ["L3m"]:
+#for layer in ["L1U","L1F","L3m","L4m","L4p"]:
+for layer in ["L1U"]:
     trainer_x = Trainer("config.json",layer,"x")
     trainer_x.train()
-    trainer_x.test()
-    trainer_x.visualize()
+    #trainer_x.test()
+    #trainer_x.visualize()
 
     # trainer_y = Trainer("config.json",layer,"y")
     # trainer_y.train()

@@ -16,10 +16,15 @@ from tensorflow.keras.layers import Input
 from tensorflow.keras.layers import concatenate
 from tensorflow.keras.models import load_model
 from tensorflow import exp
+from tensorflow import device
+from tensorflow.keras.layers import Reshape
+from tensorflow.keras.layers import LeakyReLU
+from tensorflow.keras.layers import Add
 import losses
 import cmsml
 import psutil
 import plotting
+import ThresholdManager
 
 class Trainer:
     #Class to load .json file and launch trainings
@@ -40,7 +45,6 @@ class Trainer:
             self.batch_size = config["batch_size"]
             self.batches_per_epoch = config["batches_per_epoch"]
             self.loss_name = config["loss_name"]
-
             if axis=="x":
                 self.train_h5 = config["train_x_h5"]
                 self.test_h5 = config["test_x_h5"]
@@ -54,19 +58,31 @@ class Trainer:
                 self.model_dest = config["model_dest_y"]
                 self.pitch      = config["pitch_y"]
 
-    def prepare_training_input(self):
-        n_clusters = -1#Set to -1 for all or some number like 100000 for faster debugging
+    def print_h5_keys(self, h5file):
+        def visit_fn(name, obj):
+            if isinstance(obj, h5py.Group) or isinstance(obj, h5py.Dataset):
+                print(name)
+        h5file.visititems(visit_fn)
 
+    
+    def prepare_training_input(self):
+        n_clusters = 100000#Set to -1 for all or some number like 100000 for faster debugging
         print(f"Loading training clusters from {self.train_h5}")
         f = h5py.File(self.train_h5, 'r')
-        pix_flat_train = f[f'{self.axis}_flat'][0:n_clusters]
+        print("-----Keys-----")
+        self.print_h5_keys(f)
+        print("-----Keys-----")
+        if f'train_{self.axis}_flat' in f:#In some files, train_ prefix is not present
+            pix_flat_train = f[f'train_{self.axis}_flat'][0:n_clusters]
+        else:
+            pix_flat_train = f[f'{self.axis}_flat'][0:n_clusters]
         cota_train = f['cota'][0:n_clusters]
         cotb_train = f['cotb'][0:n_clusters]
         position_train = f[self.axis][0:n_clusters] 
         clustersize_train = f[f'clustersize_{self.axis}'][0:n_clusters]
+        clucharges_train = self.decapitate_clusters(pix_flat_train,cota_train,cotb_train)
         f.close()
 
-        #Random ordering of clusters, is this really needed?
         perm = np.arange(len(pix_flat_train)) 
         np.random.shuffle(perm)
         
@@ -75,13 +91,14 @@ class Trainer:
         cotb_train = cotb_train[perm]
         position_train = position_train[perm]
         clustersize_train = clustersize_train[perm]
+        clucharges_train = clucharges_train[perm]
         angles_train = np.hstack((cota_train,cotb_train))
 
         self.pixels_train = pix_flat_train
         self.position_train = position_train
         self.angles_train = angles_train
         self.clustersize_train = clustersize_train
-
+        self.clucharges_train = clucharges_train
         self.training_input_flag = True
         print("Using {:.0f} MB of memory".format(psutil.Process().memory_info().rss / 1024 ** 2))
 
@@ -90,11 +107,18 @@ class Trainer:
 
         print(f"Loading testing clusters from {self.test_h5}")
         f = h5py.File(self.test_h5, 'r')
-        pix_flat_test = f[f'{self.axis}_flat'][0:n_clusters]
+        print("-----Keys-----")
+        self.print_h5_keys(f)
+        print("-----Keys-----")
+        if f'test_{self.axis}_flat' in f:#In some files, test_ prefix is not present
+            pix_flat_test = f[f'test_{self.axis}_flat'][0:n_clusters]
+        else:
+            pix_flat_test = f[f'{self.axis}_flat'][0:n_clusters]
         cota_test = f['cota'][0:n_clusters]
         cotb_test = f['cotb'][0:n_clusters]
         position_test = f[self.axis][0:n_clusters] 
         clustersize_test = f[f'clustersize_{self.axis}'][0:n_clusters]
+        clucharges_test = self.decapitate_clusters(pix_flat_test,cota_test,cotb_test)
         angles_test = np.hstack((cota_test,cotb_test))
         f.close()
 
@@ -102,10 +126,12 @@ class Trainer:
         self.position_test = position_test
         self.angles_test = angles_test
         self.clustersize_test = clustersize_test
+        self.clucharges_test = clucharges_test
         print(np.shape(self.pixels_test))
         print(np.shape(self.position_test))
         print(np.shape(self.angles_test))
         print(np.shape(self.clustersize_test))
+        print(np.shape(self.clucharges_test))
         print("Using {:.0f} MB of memory".format(psutil.Process().memory_info().rss / 1024 ** 2))
         self.testing_input_flag = True
 
@@ -121,43 +147,56 @@ class Trainer:
 
         if self.axis=="x":
             inputs = Input(shape=(13,1)) #13 in x dimension
+            input_dim=16
         else:
             inputs = Input(shape=(21,1)) #21 in y dimension because they are longer on average
+            input_dim=24
+
         angles = Input(shape=(2,))
+        charges= Input(shape=(1,))
         
         #This can and should be optimized
-        x = Conv1D(64, kernel_size=3, padding="same")(inputs)
-        x = Activation("relu")(x)
-        x = BatchNormalization(axis=-1)(x)
-        x = Dropout(dropout_level)(x)
-        x_cnn = Flatten()(x)
-        concat_inputs = concatenate([x_cnn,angles])
+        # x = Conv1D(64, kernel_size=3, padding="same")(inputs)
+        # x = Activation("relu")(x)
+        # x = BatchNormalization(axis=-1)(x)
+        # x = Dropout(dropout_level)(x)
+        # x_cnn = Flatten()(x)
+        #concat_inputs = concatenate([x_cnn,angles,charges])
 
-        #One branch of network for position estimate
-        position = Dense(32)(concat_inputs)
-        position = Activation("relu")(position)
-        position = Dense(32)(position)
-        position = Activation("relu")(position)
+        inputs_flat = Flatten()(inputs)  # Shape becomes (batch_size, 13)
+        concat_inputs = concatenate([inputs_flat, angles, charges])
+
+        # Position estimation branch
+        position = Dense(16 * input_dim)(concat_inputs)
+        position = LeakyReLU(alpha=0.01)(position)
+        position = Dense(8 * input_dim)(position)
+        position = LeakyReLU(alpha=0.01)(position)
+        position = Dense(4 * input_dim)(position)
+        position = LeakyReLU(alpha=0.01)(position)
         position = BatchNormalization()(position)
         position = Dropout(dropout_level)(position)
-        position = Dense(1)(position)
-
-        #Other branch of network for error (variance) estimate
-        variance = Dense(32)(concat_inputs)
-        variance = Activation("relu")(variance)
-        variance = Dense(32)(variance)
-        variance = Activation("relu")(variance)
+        
+        # Residual connection
+        position_res = Add()([position, Dense(4 * input_dim)(concat_inputs)])
+        position_out = Dense(1)(position_res)
+        
+        # Variance estimation branch
+        variance = Dense(16 * input_dim)(concat_inputs)
+        variance = LeakyReLU(alpha=0.01)(variance)
+        variance = Dense(8 * input_dim)(variance)
+        variance = LeakyReLU(alpha=0.01)(variance)
+        variance = Dense(4 * input_dim)(variance)
+        variance = LeakyReLU(alpha=0.01)(variance)
         variance = BatchNormalization()(variance)
         variance = Dropout(dropout_level)(variance)
         
-        #variance = Dense(1, activation = "softplus")(variance)#We want something positive, but not capped to [0,1] like sigmoid
-        #Alternative to using softplus, we can transform possibly negative output to something positive
-        variance = Dense(1, activation = "relu")(variance)
-        variance = exp(variance)
+        # Residual connection
+        variance_res = Add()([variance, Dense(4 * input_dim)(concat_inputs)])
+        variance_out = Dense(1, activation='softplus')(variance_res)
+        
+        position_variance = concatenate([position_out, variance_out])
 
-        position_variance = concatenate([position, variance])
-
-        model = Model(inputs=[inputs,angles],outputs=[position_variance])
+        model = Model(inputs=[inputs,angles,charges],outputs=[position_variance])
 
         # Display a model summary
         model.summary()
@@ -193,7 +232,7 @@ class Trainer:
         ]
 
         # Fit data to model
-        history = model.fit([self.pixels_train[:,:,np.newaxis],self.angles_train], [self.position_train],
+        history = model.fit([self.pixels_train[:,:,np.newaxis],self.angles_train,self.clucharges_train], [self.position_train],
                         batch_size=self.batch_size,
                         epochs=self.epochs,
                         callbacks=callbacks,
@@ -218,7 +257,8 @@ class Trainer:
         model = load_model(self.model_dest, custom_objects={self.loss_name: getattr(losses,self.loss_name),"mse_position":losses.mse_position,"mean_pulls":losses.mean_pulls})
 
         start = time.process_time()
-        pred = model.predict([self.pixels_test[:,:,np.newaxis],self.angles_test], batch_size=400000)
+        #with device('/CPU:0'):
+        pred = model.predict([self.pixels_test[:,:,np.newaxis],self.angles_test,self.clucharges_test], batch_size=400000)
         inference_time_x = time.process_time() - start
         print("Inference on {} cluster took {:.3f} s".format(len(pred),inference_time_x))
         residuals = pred[:,0] - self.position_test[:,0]
@@ -243,7 +283,8 @@ class Trainer:
         clusters_for_plotting = self.pixels_test[:n_to_plot]
         angles_for_plotting   = self.angles_test[:n_to_plot]
         position_for_plotting = self.position_test[:n_to_plot,0]
-        pred = model.predict([clusters_for_plotting[:,:,np.newaxis],angles_for_plotting])
+        charges_for_plotting = self.clucharges_test[:n_to_plot,0]
+        pred = model.predict([clusters_for_plotting[:,:,np.newaxis],angles_for_plotting,charges_for_plotting])
         
         plotting_data_sets = []
         plotting_file_name = f"plots/{self.layer}_{self.axis}.pdf"
